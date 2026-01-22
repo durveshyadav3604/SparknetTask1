@@ -1,0 +1,44 @@
+# Trivy Security Scanning Policy
+# This policy defines rules for vulnerability scanning and security checks
+
+# Fail on critical vulnerabilities
+fail_critical: true
+
+# Fail on high severity vulnerabilities
+fail_high: true
+
+# Allow medium and low severity (can be adjusted)
+fail_medium: false
+fail_low: false
+
+# Ignore specific CVEs (if needed)
+# Example:
+# ignores:
+#   - CVE-2023-XXXXX
+#     reason: "False positive, not applicable to our use case"
+
+# Ignore specific packages
+# Example:
+# package_ignores:
+#   - package_name: "some-package"
+#     reason: "Internal package, no external exposure"
+
+# Minimum severity to report
+min_severity: "MEDIUM"
+
+# Vulnerability types to check
+vulnerability_types:
+  - os
+  - library
+
+# Misconfiguration checks
+misconfig:
+  enabled: true
+  fail_on: ["HIGH", "CRITICAL"]
+
+# Secret scanning
+secret:
+  enabled: true
+  fail_on: ["HIGH", "CRITICAL"]
+
+

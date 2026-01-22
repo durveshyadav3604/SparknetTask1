@@ -1,0 +1,57 @@
+# Prometheus Configuration for Bags Luggage Application
+# Note: This is a placeholder configuration for reference.
+# Running a full Prometheus stack is outside Azure Free Tier.
+# Consider using Azure Monitor instead for production.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'bags-luggage'
+    environment: 'dev'
+
+# Alertmanager configuration (if using)
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+          # - alertmanager:9093
+
+# Load rules once and periodically evaluate them
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+# Scrape configurations
+scrape_configs:
+  # Scrape Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Scrape backend container app
+  - job_name: 'backend'
+    static_configs:
+      - targets: ['backend:5000']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # Scrape frontend container app
+  - job_name: 'frontend'
+    static_configs:
+      - targets: ['frontend:80']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # Azure Container Apps metrics (if exposed)
+  # Note: Azure Container Apps metrics are available through Azure Monitor
+  # This is a placeholder for if you set up custom metrics endpoints
+  - job_name: 'azure-container-apps'
+    static_configs:
+      - targets: []
+        # Configure based on your metrics endpoint setup
+
+# Note: For production, use Azure Monitor and Application Insights
+# instead of self-hosted Prometheus to stay within free tier limits.
+
+

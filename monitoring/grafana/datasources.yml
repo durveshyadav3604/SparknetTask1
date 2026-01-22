@@ -1,0 +1,47 @@
+# Grafana Datasources Configuration
+# Note: This is a placeholder configuration for reference.
+# Running a full Grafana stack is outside Azure Free Tier.
+# Consider using Azure Monitor dashboards instead for production.
+
+apiVersion: 1
+
+datasources:
+  # Prometheus datasource
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+
+  # Azure Monitor datasource (recommended for Azure deployments)
+  - name: Azure Monitor
+    type: grafana-azure-monitor-datasource
+    access: proxy
+    jsonData:
+      cloudName: azuremonitor
+      subscriptionId: ${AZURE_SUBSCRIPTION_ID}
+      tenantId: ${AZURE_TENANT_ID}
+      clientId: ${AZURE_CLIENT_ID}
+    secureJsonData:
+      clientSecret: ${AZURE_CLIENT_SECRET}
+    editable: true
+
+  # Azure Log Analytics datasource
+  - name: Azure Log Analytics
+    type: grafana-azure-log-analytics-datasource
+    access: proxy
+    jsonData:
+      subscriptionId: ${AZURE_SUBSCRIPTION_ID}
+      tenantId: ${AZURE_TENANT_ID}
+      clientId: ${AZURE_CLIENT_ID}
+      logAnalyticsDefaultWorkspace: ${LOG_ANALYTICS_WORKSPACE_ID}
+    secureJsonData:
+      clientSecret: ${AZURE_CLIENT_SECRET}
+    editable: true
+
+# Note: For production, use Azure Monitor dashboards and
+# Azure Application Insights instead of self-hosted Grafana
+# to stay within free tier limits.
+
+

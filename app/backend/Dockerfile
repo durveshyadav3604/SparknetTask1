@@ -1,0 +1,17 @@
+FROM node:18-alpine
+WORKDIR /app
+
+ARG PORT
+ARG MONGO_URI
+ARG SERVER_URL
+
+ENV PORT=${PORT}
+ENV MONGO_URI=${MONGO_URI}
+ENV SERVER_URL=${SERVER_URL}
+
+COPY package*.json ./
+RUN npm ci
+COPY . .
+
+EXPOSE 3000
+CMD ["npm", "start"]

@@ -51,5 +51,4 @@ jobs:
 
       - name: Terraform Apply
         run: |
-          cd scripts
-          bash terraform_deploy.sh
+          bash scripts/terraform_deploy.sh

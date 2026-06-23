@@ -56,4 +56,4 @@ jobs:
 
       - name: Terraform Apply
         run: |
-          bash scripts/terraform_deploy.sh
+          bash scripts/terraform_destroy.sh

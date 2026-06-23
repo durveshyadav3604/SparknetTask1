@@ -49,6 +49,11 @@ jobs:
           docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest
 
+      - name: Setup Terraform          
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+
       - name: Terraform Apply
         run: |
           bash scripts/terraform_deploy.sh

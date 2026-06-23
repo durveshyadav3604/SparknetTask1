@@ -38,8 +38,8 @@ jobs:
 
       - name: Build Docker Images
         run: |
-          docker build -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest -f docker/Dockerfile.backend .
-          docker build -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest -f docker/Dockerfile.frontend .
+          docker build -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest -f app/backend/Dockerfile app/backend
+          docker build -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest -f app/frontend/Dockerfile app/frontend
 
       - name: Security Scan
         run: bash security/trivy_scan.sh ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
@@ -51,5 +51,5 @@ jobs:
 
       - name: Terraform Apply
         run: |
-          cd terraform
-          bash init.sh
+          cd scripts
+          bash terraform_deploy.sh

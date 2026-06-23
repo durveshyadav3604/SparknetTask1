@@ -3,7 +3,7 @@ set -e
 
 echo "��� Starting Terraform Deployment..."
 
-cd terraform
+cd terraform/main
 
 terraform init
 terraform validate

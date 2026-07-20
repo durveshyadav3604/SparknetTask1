@@ -1,4 +1,4 @@
-﻿# 🧩 Luggage Bags Full-Stack DevOps Migration challenge
+﻿# 🧩 Luggage Bags Full-Stack DevOps Migration Challenge
 
 **Azure → AWS (Free Tier)**
 

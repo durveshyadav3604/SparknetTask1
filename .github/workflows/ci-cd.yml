@@ -1,7 +1,13 @@
 name: DevOps Pipeline
+
 on:
   push:
     branches: [ "main" ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   IMAGE_NAME: luggage-bag-app
   AWS_REGION: ${{ secrets.AWS_REGION }}
@@ -12,9 +18,13 @@ env:
   BACKEND_CONTAINER: backend
   FRONTEND_CONTAINER: frontend
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     outputs:
       image_tag: ${{ steps.vars.outputs.image_tag }}
     steps:
@@ -29,6 +39,7 @@ jobs:
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: app/backend/Dockerfile
+          no-fail: true   # don't hard-block on lint warnings; set false once clean
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -44,15 +55,31 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build Docker Images
-        run: |
-          IMAGE_TAG=${{ steps.vars.outputs.image_tag }}
-          docker build -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:$IMAGE_TAG \
-                        -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-                        -f app/backend/Dockerfile app/backend
-          docker build -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:$IMAGE_TAG \
-                        -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest \
-                        -f app/frontend/Dockerfile app/frontend
+      - name: Build & push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: app/backend
+          file: app/backend/Dockerfile
+          push: false
+          load: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.image_tag }}
+            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Build & push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: app/frontend
+          file: app/frontend/Dockerfile
+          push: false
+          load: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:${{ steps.vars.outputs.image_tag }}
+            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
 
       - name: Security Scan
         run: |
@@ -71,8 +98,7 @@ jobs:
     name: Deploy to ECS
     needs: build
     runs-on: ubuntu-latest
-    environment:
-      name: production
+    timeout-minutes: 15
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4

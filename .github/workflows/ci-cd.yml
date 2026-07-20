@@ -1,155 +1,39 @@
 name: DevOps Pipeline
-
 on:
   push:
     branches: [ "main" ]
-
 env:
   IMAGE_NAME: luggage-bag-app
   AWS_REGION: ${{ secrets.AWS_REGION }}
   ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
-  ECS_CLUSTER: luggage-bag-cluster
-  BACKEND_SERVICE: luggage-bag-backend-service
-  FRONTEND_SERVICE: luggage-bag-frontend-service
-  BACKEND_CONTAINER: backend
-  FRONTEND_CONTAINER: frontend
-
-permissions:
-  contents: read
-
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    outputs:
-      image_tag: ${{ steps.vars.outputs.image_tag }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
-      - name: Set image tag
-        id: vars
-        run: echo "image_tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
-
       - name: Lint Dockerfiles
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: app/backend/Dockerfile
-          no-fail: true   # don't hard-block on lint warnings; set false once clean
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
-
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build & push backend image
-        uses: docker/build-push-action@v6
-        with:
-          context: app/backend
-          file: app/backend/Dockerfile
-          push: false
-          load: true
-          tags: |
-            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.image_tag }}
-            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          cache-from: type=gha,scope=backend
-          cache-to: type=gha,mode=max,scope=backend
-
-      - name: Build & push frontend image
-        uses: docker/build-push-action@v6
-        with:
-          context: app/frontend
-          file: app/frontend/Dockerfile
-          push: false
-          load: true
-          tags: |
-            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:${{ steps.vars.outputs.image_tag }}
-            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest
-          cache-from: type=gha,scope=frontend
-          cache-to: type=gha,mode=max,scope=frontend
-
-      - name: Security Scan
+      - name: Build Docker Images
         run: |
-          bash security/trivy_scan.sh ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.image_tag }}
-          bash security/trivy_scan.sh ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:${{ steps.vars.outputs.image_tag }}
-
+          docker build -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest -f app/backend/Dockerfile app/backend
+          docker build -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest -f app/frontend/Dockerfile app/frontend
+      - name: Security Scan
+        run: bash security/trivy_scan.sh ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
       - name: Push Images to ECR
         run: |
-          IMAGE_TAG=${{ steps.vars.outputs.image_tag }}
-          docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:$IMAGE_TAG
           docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:$IMAGE_TAG
           docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest
-
-  deploy:
-    name: Deploy to ECS
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      # ---------- BACKEND ----------
-      - name: Download current backend task definition
-        run: |
-          aws ecs describe-task-definition \
-            --task-definition ${{ env.BACKEND_SERVICE }} \
-            --query taskDefinition > backend-task-def.json
-
-      - name: Render new backend image into task def
-        id: backend-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: backend-task-def.json
-          container-name: ${{ env.BACKEND_CONTAINER }}
-          image: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}
-
-      - name: Deploy backend to ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.backend-task-def.outputs.task-definition }}
-          service: ${{ env.BACKEND_SERVICE }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-          wait-for-minutes: 10
-
-      # ---------- FRONTEND ----------
-      - name: Download current frontend task definition
-        run: |
-          aws ecs describe-task-definition \
-            --task-definition ${{ env.FRONTEND_SERVICE }} \
-            --query taskDefinition > frontend-task-def.json
-
-      - name: Render new frontend image into task def
-        id: frontend-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: frontend-task-def.json
-          container-name: ${{ env.FRONTEND_CONTAINER }}
-          image: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:${{ needs.build.outputs.image_tag }}
-
-      - name: Deploy frontend to ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.frontend-task-def.outputs.task-definition }}
-          service: ${{ env.FRONTEND_SERVICE }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-          wait-for-minutes: 10

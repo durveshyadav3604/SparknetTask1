@@ -2,38 +2,117 @@ name: DevOps Pipeline
 on:
   push:
     branches: [ "main" ]
+
 env:
   IMAGE_NAME: luggage-bag-app
   AWS_REGION: ${{ secrets.AWS_REGION }}
   ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+  ECS_CLUSTER: your-ecs-cluster-name
+  ECS_SERVICE_BACKEND: luggage-bag-backend-service
+  ECS_SERVICE_FRONTEND: luggage-bag-frontend-service
+  ECS_TASK_DEF_BACKEND: task-def/backend-taskdef.json
+  ECS_TASK_DEF_FRONTEND: task-def/frontend-taskdef.json
+  CONTAINER_NAME_BACKEND: backend
+  CONTAINER_NAME_FRONTEND: frontend
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.vars.outputs.tag }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: vars
+        run: echo "tag=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
       - name: Lint Dockerfiles
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: app/backend/Dockerfile
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
+
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
+
       - name: Build Docker Images
         run: |
-          docker build -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest -f app/backend/Dockerfile app/backend
-          docker build -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest -f app/frontend/Dockerfile app/frontend
+          docker build -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }} \
+            -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            -f app/backend/Dockerfile app/backend
+
+          docker build -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:${{ steps.vars.outputs.tag }} \
+            -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest \
+            -f app/frontend/Dockerfile app/frontend
+
       - name: Security Scan
-        run: bash security/trivy_scan.sh ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+        run: bash security/trivy_scan.sh ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}
+
       - name: Push Images to ECR
         run: |
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}
           docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:${{ steps.vars.outputs.tag }}
           docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # ---- Backend ----
+      - name: Render backend task definition
+        id: render-backend
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ env.ECS_TASK_DEF_BACKEND }}
+          container-name: ${{ env.CONTAINER_NAME_BACKEND }}
+          image: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image-tag }}
+
+      - name: Deploy backend to ECS (EC2)
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-backend.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE_BACKEND }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          force-new-deployment: true
+
+      # ---- Frontend ----
+      - name: Render frontend task definition
+        id: render-frontend
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ env.ECS_TASK_DEF_FRONTEND }}
+          container-name: ${{ env.CONTAINER_NAME_FRONTEND }}
+          image: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:${{ needs.build.outputs.image-tag }}
+
+      - name: Deploy frontend to ECS (EC2)
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-frontend.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE_FRONTEND }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          force-new-deployment: true

@@ -10,8 +10,8 @@ env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
   ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
   ECS_CLUSTER: awsinfra-cluster       # must match "${var.project_name}-cluster"
-  ECS_SERVICE_BACKEND: luggage-bag-backend-service
-  ECS_SERVICE_FRONTEND: luggage-bag-frontend-service
+  ECS_SERVICE_BACKEND: awsinfra-backend-service
+  ECS_SERVICE_FRONTEND: awsinfra-frontend-service
   CONTAINER_NAME_BACKEND: backend
   CONTAINER_NAME_FRONTEND: frontend
 

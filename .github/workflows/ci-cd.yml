@@ -1,17 +1,17 @@
 name: DevOps Pipeline
+
 on:
   push:
     branches: [ "main" ]
 
 env:
+  PROJECT_NAME: luggage-bag              # must match var.project_name in Terraform
   IMAGE_NAME: luggage-bag-app
   AWS_REGION: ${{ secrets.AWS_REGION }}
   ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
-  ECS_CLUSTER: your-ecs-cluster-name
+  ECS_CLUSTER: luggage-bag-cluster       # must match "${var.project_name}-cluster"
   ECS_SERVICE_BACKEND: luggage-bag-backend-service
   ECS_SERVICE_FRONTEND: luggage-bag-frontend-service
-  ECS_TASK_DEF_BACKEND: task-def/backend-taskdef.json
-  ECS_TASK_DEF_FRONTEND: task-def/frontend-taskdef.json
   CONTAINER_NAME_BACKEND: backend
   CONTAINER_NAME_FRONTEND: frontend
 
@@ -41,7 +41,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
@@ -79,14 +79,27 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Make task-def working dir
+        run: mkdir -p task-def
 
       # ---- Backend ----
+      # Pull the LIVE task definition from ECS (whatever Terraform / the last
+      # deploy registered) instead of maintaining a static JSON file in the
+      # repo. This keeps CPU/memory, IAM roles, log group, secrets, env vars,
+      # etc. always in sync with what Terraform actually created.
+      - name: Download current backend task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.PROJECT_NAME }}-backend \
+            --query taskDefinition > task-def/backend-taskdef.json
+
       - name: Render backend task definition
         id: render-backend
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          task-definition: ${{ env.ECS_TASK_DEF_BACKEND }}
+          task-definition: task-def/backend-taskdef.json
           container-name: ${{ env.CONTAINER_NAME_BACKEND }}
           image: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image-tag }}
 
@@ -100,11 +113,17 @@ jobs:
           force-new-deployment: true
 
       # ---- Frontend ----
+      - name: Download current frontend task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.PROJECT_NAME }}-frontend \
+            --query taskDefinition > task-def/frontend-taskdef.json
+
       - name: Render frontend task definition
         id: render-frontend
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          task-definition: ${{ env.ECS_TASK_DEF_FRONTEND }}
+          task-definition: task-def/frontend-taskdef.json
           container-name: ${{ env.CONTAINER_NAME_FRONTEND }}
           image: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:${{ needs.build.outputs.image-tag }}
 

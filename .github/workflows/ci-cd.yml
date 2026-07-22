@@ -5,11 +5,11 @@ on:
     branches: [ "main" ]
 
 env:
-  PROJECT_NAME: luggage-bag              # must match var.project_name in Terraform
+  PROJECT_NAME: awsinfra              # must match var.project_name in Terraform
   IMAGE_NAME: luggage-bag-app
   AWS_REGION: ${{ secrets.AWS_REGION }}
   ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
-  ECS_CLUSTER: luggage-bag-cluster       # must match "${var.project_name}-cluster"
+  ECS_CLUSTER: awsinfra-cluster       # must match "${var.project_name}-cluster"
   ECS_SERVICE_BACKEND: luggage-bag-backend-service
   ECS_SERVICE_FRONTEND: luggage-bag-frontend-service
   CONTAINER_NAME_BACKEND: backend

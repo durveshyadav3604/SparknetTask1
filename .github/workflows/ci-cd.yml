@@ -5,7 +5,7 @@ on:
     branches: [ "main" ]
 
 env:
-  PROJECT_NAME: awsinfra              # must match var.project_name in terraform
+  PROJECT_NAME: awsinfra              # must match var.project_name in Terraform
   IMAGE_NAME: luggage-bag-app
   AWS_REGION: ${{ secrets.AWS_REGION }}
   ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com

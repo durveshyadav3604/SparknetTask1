@@ -1,137 +1,192 @@
-name: DevOps Pipeline
+# Belongs in the APP repo (SparknetTask1), not this infra repo -
+# .github/workflows/ci-cd.yml there. Included here so the pipeline ships
+# alongside the infra that defines what it deploys to.
+#
+# Flow: detect which of backend/frontend changed -> build, Trivy-scan,
+# push each changed image to ECR tagged by commit SHA -> register a new
+# ECS task-definition revision for each changed service -> force a new
+# deployment -> wait for it to go stable. Terraform never re-applies
+# `container_definitions` after the first `apply` (see modules/ecs/main.tf),
+# so this workflow and `terraform apply` never race each other.
+name: CI/CD
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write   # required for AWS OIDC auth - no access keys in secrets
+  contents: read
 
 env:
-  PROJECT_NAME: awsinfra              # must match var.project_name in Terraform
-  IMAGE_NAME: luggage-bag-app
-  AWS_REGION: ${{ secrets.AWS_REGION }}
-  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
-  ECS_CLUSTER: awsinfra-cluster       # must match "${var.project_name}-cluster"
-  ECS_SERVICE_BACKEND: awsinfra-backend-service
-  ECS_SERVICE_FRONTEND: awsinfra-frontend-service
-  CONTAINER_NAME_BACKEND: backend
-  CONTAINER_NAME_FRONTEND: frontend
+  AWS_REGION: ap-south-1
+  ECS_CLUSTER: awsinfra-cluster
+  # Set these to the outputs from `terraform output` in the infra repo:
+  # AWS_DEPLOY_ROLE_ARN            <- github_actions_deploy_role_arn
+  # BACKEND_ECR_REPOSITORY          <- backend_ecr_repository_name
+  # FRONTEND_ECR_REPOSITORY         <- frontend_ecr_repository_name
+  # BACKEND_TASK_FAMILY              <- backend_task_family
+  # FRONTEND_TASK_FAMILY             <- frontend_task_family
+  # BACKEND_SERVICE                  <- backend_service_name
+  # FRONTEND_SERVICE                 <- frontend_service_name
+  BACKEND_ECR_REPOSITORY: luggage-bag-app
+  FRONTEND_ECR_REPOSITORY: luggage-bag-app-frontend
+  BACKEND_TASK_FAMILY: awsinfra-backend
+  FRONTEND_TASK_FAMILY: awsinfra-frontend
+  BACKEND_SERVICE: awsinfra-backend-service
+  FRONTEND_SERVICE: awsinfra-frontend-service
 
 jobs:
-  build:
+  changes:
     runs-on: ubuntu-latest
     outputs:
-      image-tag: ${{ steps.vars.outputs.tag }}
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set image tag
-        id: vars
-        run: echo "tag=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
-
-      - name: Lint Dockerfiles
-        uses: hadolint/hadolint-action@v3.1.0
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
         with:
-          dockerfile: app/backend/Dockerfile
+          filters: |
+            backend:
+              - 'backend/**'
+            frontend:
+              - 'frontend/**'
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+  build-backend:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to Amazon ECR
-        id: login-ecr
+      - name: Login to ECR
+        id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build Docker Images
+      - name: Build image
         run: |
-          docker build -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }} \
-            -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-            -f app/backend/Dockerfile app/backend
+          docker build -t "$BACKEND_ECR_REPOSITORY:${{ github.sha }}" ./backend
 
-          docker build -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:${{ steps.vars.outputs.tag }} \
-            -t ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest \
-            -f app/frontend/Dockerfile app/frontend
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: "${{ env.BACKEND_ECR_REPOSITORY }}:${{ github.sha }}"
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "1" # fail the build on critical/high CVEs
 
-      - name: Security Scan
-        run: bash security/trivy_scan.sh ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}
-
-      - name: Push Images to ECR
+      - name: Tag and push to ECR
+        id: image
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
         run: |
-          docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}
-          docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:${{ steps.vars.outputs.tag }}
-          docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest
+          IMAGE="$REGISTRY/$BACKEND_ECR_REPOSITORY:${{ github.sha }}"
+          docker tag "$BACKEND_ECR_REPOSITORY:${{ github.sha }}" "$IMAGE"
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
-  deploy:
-    needs: build
+  build-frontend:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      image: ${{ steps.image.outputs.image }}
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Make task-def working dir
-        run: mkdir -p task-def
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
 
-      # ---- Backend ----
-      # Pull the LIVE task definition from ECS (whatever Terraform / the last
-      # deploy registered) instead of maintaining a static JSON file in the
-      # repo. This keeps CPU/memory, IAM roles, log group, secrets, env vars,
-      # etc. always in sync with what Terraform actually created.
-      - name: Download current backend task definition
+      - name: Build image
+        # REACT_APP_API_URL is baked in at build time, not injected at
+        # runtime (nginx serves a static bundle) - see terraform.tfvars
+        # comment in the infra repo.
         run: |
-          aws ecs describe-task-definition \
-            --task-definition ${{ env.PROJECT_NAME }}-backend \
-            --query taskDefinition > task-def/backend-taskdef.json
+          docker build \
+            --build-arg REACT_APP_API_URL=/api \
+            -t "$FRONTEND_ECR_REPOSITORY:${{ github.sha }}" ./frontend
 
-      - name: Render backend task definition
-        id: render-backend
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.24.0
         with:
-          task-definition: task-def/backend-taskdef.json
-          container-name: ${{ env.CONTAINER_NAME_BACKEND }}
-          image: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image-tag }}
+          image-ref: "${{ env.FRONTEND_ECR_REPOSITORY }}:${{ github.sha }}"
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "1"
 
-      - name: Deploy backend to ECS (EC2)
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.render-backend.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE_BACKEND }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-          force-new-deployment: true
-
-      # ---- Frontend ----
-      - name: Download current frontend task definition
+      - name: Tag and push to ECR
+        id: image
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
         run: |
-          aws ecs describe-task-definition \
-            --task-definition ${{ env.PROJECT_NAME }}-frontend \
-            --query taskDefinition > task-def/frontend-taskdef.json
+          IMAGE="$REGISTRY/$FRONTEND_ECR_REPOSITORY:${{ github.sha }}"
+          docker tag "$FRONTEND_ECR_REPOSITORY:${{ github.sha }}" "$IMAGE"
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
-      - name: Render frontend task definition
-        id: render-frontend
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: task-def/frontend-taskdef.json
-          container-name: ${{ env.CONTAINER_NAME_FRONTEND }}
-          image: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:${{ needs.build.outputs.image-tag }}
+  deploy-backend:
+    needs: build-backend
+    if: needs.build-backend.result == 'success'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Deploy frontend to ECS (EC2)
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          task-definition: ${{ steps.render-frontend.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE_FRONTEND }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-          force-new-deployment: true
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Register new task def revision and roll the service
+        run: |
+          chmod +x ./scripts/deploy-ecs-service.sh
+          ./scripts/deploy-ecs-service.sh \
+            "$ECS_CLUSTER" \
+            "$BACKEND_SERVICE" \
+            "$BACKEND_TASK_FAMILY" \
+            backend \
+            "${{ needs.build-backend.outputs.image }}"
+
+  deploy-frontend:
+    needs: build-frontend
+    if: needs.build-frontend.result == 'success'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Register new task def revision and roll the service
+        run: |
+          chmod +x ./scripts/deploy-ecs-service.sh
+          ./scripts/deploy-ecs-service.sh \
+            "$ECS_CLUSTER" \
+            "$FRONTEND_SERVICE" \
+            "$FRONTEND_TASK_FAMILY" \
+            frontend \
+            "${{ needs.build-frontend.outputs.image }}"

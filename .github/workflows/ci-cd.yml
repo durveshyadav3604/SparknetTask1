@@ -22,7 +22,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  id-token: write   # required for AWS OIDC auth - no access keys in secrets
+  id-token: write   # required for AWS OIDC Auth - no access keys in secrets
   contents: read
 
 env:

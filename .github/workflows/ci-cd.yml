@@ -8,6 +8,12 @@
 # deployment -> wait for it to go stable. Terraform never re-applies
 # `container_definitions` after the first `apply` (see modules/ecs/main.tf),
 # so this workflow and `terraform apply` never race each other.
+# FIXED: paths and docker build contexts pointed at top-level backend/ and
+# frontend/ folders, which don't exist in this repo - the app actually lives
+# under app/backend and app/frontend. As written before this fix, the
+# paths-filter step never matched a change (so build/deploy jobs never ran),
+# and even a manual run would fail at `docker build ... ./backend` with
+# "no such file or directory".
 name: CI/CD
 
 on:
@@ -50,9 +56,9 @@ jobs:
         with:
           filters: |
             backend:
-              - 'backend/**'
+              - 'app/backend/**'
             frontend:
-              - 'frontend/**'
+              - 'app/frontend/**'
 
   build-backend:
     needs: changes
@@ -76,7 +82,7 @@ jobs:
 
       - name: Build image
         run: |
-          docker build -t "$BACKEND_ECR_REPOSITORY:${{ github.sha }}" ./backend
+          docker build -t "$BACKEND_ECR_REPOSITORY:${{ github.sha }}" ./app/backend
 
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@0.24.0
@@ -117,13 +123,18 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build image
-        # REACT_APP_API_URL is baked in at build time, not injected at
-        # runtime (nginx serves a static bundle) - see terraform.tfvars
-        # comment in the infra repo.
+        # REACT_APP_API_URL is baked in at build time (nginx serves a static
+        # bundle, no runtime env injection possible). FIXED: this used to be
+        # "/api", but apiConfig.js and CheckoutPage.jsx already append
+        # "/api/orders" to this value - "/api" + "/api/orders" baked in
+        # "/api/api/orders", a 404. Empty string = relative "/api/orders",
+        # which resolves against the ALB's own origin and gets path-routed
+        # to the backend target group (see modules/alb) - same-origin, so no
+        # CORS setup is needed either.
         run: |
           docker build \
-            --build-arg REACT_APP_API_URL=/api \
-            -t "$FRONTEND_ECR_REPOSITORY:${{ github.sha }}" ./frontend
+            --build-arg REACT_APP_API_URL= \
+            -t "$FRONTEND_ECR_REPOSITORY:${{ github.sha }}" ./app/frontend
 
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@0.24.0

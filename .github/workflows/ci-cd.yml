@@ -7,8 +7,8 @@ on:
 env:
   AWS_REGION: ap-south-1
   ECS_CLUSTER: awsinfra-cluster
-  BACKEND_ECR_REPO: backend
-  FRONTEND_ECR_REPO: frontend
+  BACKEND_ECR_REPO: luggage-bag-app
+  FRONTEND_ECR_REPO: luggage-bag-app-frontend
   BACKEND_SERVICE: awsinfra-backend-service
   FRONTEND_SERVICE: awsinfra-frontend-service
   BACKEND_TASK_FAMILY: awsinfra-backend

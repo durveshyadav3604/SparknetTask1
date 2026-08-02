@@ -1,0 +1,171 @@
+name: DevOps Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+
+env:
+  AWS_REGION: ap-south-1
+  ECS_CLUSTER: awsinfra-cluster
+  BACKEND_ECR_REPO: backend
+  FRONTEND_ECR_REPO: frontend
+  BACKEND_SERVICE: awsinfra-backend-service
+  FRONTEND_SERVICE: awsinfra-frontend-service
+  BACKEND_TASK_FAMILY: awsinfra-backend
+  FRONTEND_TASK_FAMILY: awsinfra-frontend
+
+permissions:
+  id-token: write   # required for OIDC AWS auth - no long-lived keys needed
+  contents: read
+
+jobs:
+  lint:
+    name: Lint Dockerfiles
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Lint backend Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: app/backend/Dockerfile
+          config: security/hadolint.yaml
+
+      - name: Lint frontend Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: app/frontend/Dockerfile
+          config: security/hadolint.yaml
+
+  build-scan-push:
+    name: Build, Scan, Push
+    needs: lint
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.vars.outputs.image_tag }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: vars
+        run: echo "image_tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # MONGO_URI is deliberately NOT passed as a build-arg here. The
+      # backend Dockerfile declares it as an ARG/ENV, but baking a DB
+      # credential into an image layer means anyone who can `docker pull` or
+      # `docker history` the image can read it. Leaving it unset here means
+      # the image builds with an empty value, and the real value is injected
+      # at container start via the ECS task definition's environment block
+      # instead (set in Terraform / terraform.tfvars) - never on disk in the
+      # image itself.
+      - name: Build backend image
+        run: |
+          docker build \
+            --build-arg PORT=5000 \
+            -t ${{ steps.ecr-login.outputs.registry }}/${{ env.BACKEND_ECR_REPO }}:${{ steps.vars.outputs.image_tag }} \
+            -f app/backend/Dockerfile \
+            app/backend
+
+      - name: Build frontend image
+        run: |
+          docker build \
+            --build-arg REACT_APP_API_URL=${{ secrets.REACT_APP_API_URL }} \
+            -t ${{ steps.ecr-login.outputs.registry }}/${{ env.FRONTEND_ECR_REPO }}:${{ steps.vars.outputs.image_tag }} \
+            -f app/frontend/Dockerfile \
+            app/frontend
+
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Security scan - backend
+        run: |
+          bash security/trivy_scan.sh ${{ steps.ecr-login.outputs.registry }}/${{ env.BACKEND_ECR_REPO }}:${{ steps.vars.outputs.image_tag }}
+
+      - name: Security scan - frontend
+        run: |
+          bash security/trivy_scan.sh ${{ steps.ecr-login.outputs.registry }}/${{ env.FRONTEND_ECR_REPO }}:${{ steps.vars.outputs.image_tag }}
+
+      - name: Push backend image
+        run: docker push ${{ steps.ecr-login.outputs.registry }}/${{ env.BACKEND_ECR_REPO }}:${{ steps.vars.outputs.image_tag }}
+
+      - name: Push frontend image
+        run: docker push ${{ steps.ecr-login.outputs.registry }}/${{ env.FRONTEND_ECR_REPO }}:${{ steps.vars.outputs.image_tag }}
+
+  deploy:
+    name: Deploy to ECS
+    needs: build-scan-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Pull the live task definition instead of keeping a static JSON file
+      # in the repo - Terraform owns the first revision (cpu/memory/roles/
+      # log config); this workflow only ever swaps the image on top of it,
+      # so the two can't drift out of sync.
+      - name: Fetch current backend task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.BACKEND_TASK_FAMILY }} \
+            --query 'taskDefinition' > backend-taskdef.json
+
+      - name: Fetch current frontend task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.FRONTEND_TASK_FAMILY }} \
+            --query 'taskDefinition' > frontend-taskdef.json
+
+      - name: Render new backend image into task definition
+        id: render-backend
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: backend-taskdef.json
+          container-name: backend
+          image: ${{ steps.ecr-login.outputs.registry }}/${{ env.BACKEND_ECR_REPO }}:${{ needs.build-scan-push.outputs.image-tag }}
+
+      - name: Render new frontend image into task definition
+        id: render-frontend
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: frontend-taskdef.json
+          container-name: frontend
+          image: ${{ steps.ecr-login.outputs.registry }}/${{ env.FRONTEND_ECR_REPO }}:${{ needs.build-scan-push.outputs.image-tag }}
+
+      - name: Deploy backend to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-backend.outputs.task-definition }}
+          service: ${{ env.BACKEND_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: Deploy frontend to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-frontend.outputs.task-definition }}
+          service: ${{ env.FRONTEND_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true

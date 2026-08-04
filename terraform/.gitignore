@@ -1,0 +1,13 @@
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+
+# Anything named like a local secret-var file - use these for mongo_uri
+# instead of putting it in terraform.tfvars.
+*.secret.tfvars
+secrets.auto.tfvars
+statefile.tf
